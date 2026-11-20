@@ -7,20 +7,19 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object ApiClient {
-    private const val URL_API = "https://api.anthropic.com/v1/messages"
-    private const val MODEL = "claude-sonnet-5-5"
+    private const val MODEL = "gemini-2.5-flash"
+    private const val URL_API =
+        "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
     private const val SYSTEM =
         "You are ESMU, a cheerful, friendly anime-style AI companion living on the user's " +
         "phone screen. Be warm and playful, and keep answers short and clear for a small screen."
 
-    /** Key saved in the app wins; otherwise the one baked in from the GitHub secret. */
     fun resolveKey(ctx: Context): String {
         val saved = ctx.getSharedPreferences("esmu", Context.MODE_PRIVATE)
             .getString("api_key", "") ?: ""
         return if (saved.isNotBlank()) saved else BuildConfig.API_KEY
     }
 
-    /** Blocking call - run on a background thread. */
     fun chat(apiKey: String, messages: JSONArray): String {
         val conn = URL(URL_API).openConnection() as HttpURLConnection
         try {
@@ -29,14 +28,19 @@ object ApiClient {
             conn.readTimeout = 60000
             conn.doOutput = true
             conn.setRequestProperty("content-type", "application/json")
-            conn.setRequestProperty("x-api-key", apiKey)
-            conn.setRequestProperty("anthropic-version", "2023-06-01")
+            conn.setRequestProperty("x-goog-api-key", apiKey)
 
+            val contents = JSONArray()
+            for (i in 0 until messages.length()) {
+                val m = messages.getJSONObject(i)
+                val role = if (m.getString("role") == "assistant") "model" else "user"
+                contents.put(JSONObject().put("role", role).put(
+                    "parts", JSONArray().put(JSONObject().put("text", m.getString("content")))))
+            }
             val body = JSONObject()
-                .put("model", MODEL)
-                .put("max_tokens", 600)
-                .put("system", SYSTEM)
-                .put("messages", messages)
+                .put("systemInstruction", JSONObject().put(
+                    "parts", JSONArray().put(JSONObject().put("text", SYSTEM))))
+                .put("contents", contents)
             conn.outputStream.use { it.write(body.toString().toByteArray()) }
 
             val code = conn.responseCode
@@ -44,12 +48,10 @@ object ApiClient {
             val text = stream.bufferedReader().use { it.readText() }
             if (code !in 200..299) throw Exception("API error $code: $text")
 
-            val content = JSONObject(text).getJSONArray("content")
+            val parts = JSONObject(text).getJSONArray("candidates").getJSONObject(0)
+                .getJSONObject("content").getJSONArray("parts")
             val sb = StringBuilder()
-            for (i in 0 until content.length()) {
-                val block = content.getJSONObject(i)
-                if (block.optString("type") == "text") sb.append(block.getString("text"))
-            }
+            for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text"))
             return sb.toString().trim()
         } finally {
             conn.disconnect()
