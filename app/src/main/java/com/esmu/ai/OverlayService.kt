@@ -7,10 +7,15 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.text.InputType
 import android.view.Gravity
 import android.view.MotionEvent
@@ -38,6 +43,30 @@ class OverlayService : Service() {
     private var tts: TextToSpeech? = null
     private var voiceOn = true
 
+    // 3D tilt
+    private var sensorMgr: SensorManager? = null
+    private val tilt = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            character.rotationY = (-e.values[0] * 4f).coerceIn(-25f, 25f)
+            character.rotationX = ((e.values[1] - 6f) * 3f).coerceIn(-20f, 20f)
+        }
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    }
+
+    // Talking animation (optional esmu_talk.png)
+    private val idleRes = R.drawable.esmu
+    private var talkRes = 0
+    private var talking = false
+    private val flap = object : Runnable {
+        var open = false
+        override fun run() {
+            if (!talking) { character.setImageResource(idleRes); return }
+            open = !open
+            character.setImageResource(if (open && talkRes != 0) talkRes else idleRes)
+            ui.postDelayed(this, 180)
+        }
+    }
+
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -46,16 +75,28 @@ class OverlayService : Service() {
         super.onCreate()
         startForegroundNotification()
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        talkRes = resources.getIdentifier("esmu_talk", "drawable", packageName)
+
         tts = TextToSpeech(this) {
             if (it == TextToSpeech.SUCCESS) {
                 tts?.language = Locale.US
                 tts?.setPitch(1.3f)
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(id: String?) {
+                        ui.post { talking = true; ui.removeCallbacks(flap); ui.post(flap) }
+                    }
+                    override fun onDone(id: String?) { ui.post { talking = false } }
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(id: String?) { ui.post { talking = false } }
+                })
             }
         }
         addCharacter()
     }
 
     override fun onDestroy() {
+        sensorMgr?.unregisterListener(tilt)
+        ui.removeCallbacksAndMessages(null)
         runCatching { wm.removeView(character) }
         hidePanel()
         tts?.shutdown()
@@ -79,21 +120,22 @@ class OverlayService : Service() {
         w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
     )
 
-    // ---------- Floating anime character ----------
+    // ---------- Floating character ----------
     private fun addCharacter() {
         character = ImageView(this).apply {
-            setImageResource(R.drawable.esmu)
+            setImageResource(idleRes)
             scaleType = ImageView.ScaleType.FIT_CENTER
             setPadding(dp(6), dp(6), dp(6), dp(6))
+            cameraDistance = resources.displayMetrics.density * 9000f
         }
         charParams = overlayParams(
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, dp(116), dp(116)
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, dp(170), dp(170)
         ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(16); y = dp(200) }
 
-        // Idle "breathing" animation
+        // Idle breathing
         listOf("scaleX", "scaleY").forEach { prop ->
-            ObjectAnimator.ofFloat(character, prop, 1f, 1.06f).apply {
-                duration = 1100
+            ObjectAnimator.ofFloat(character, prop, 1f, 1.05f).apply {
+                duration = 1200
                 repeatMode = ObjectAnimator.REVERSE
                 repeatCount = ObjectAnimator.INFINITE
                 interpolator = AccelerateDecelerateInterpolator()
@@ -118,11 +160,17 @@ class OverlayService : Service() {
             }
             true
         }
+
+        sensorMgr = getSystemService(SENSOR_SERVICE) as SensorManager
+        sensorMgr?.registerListener(
+            tilt, sensorMgr?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER),
+            SensorManager.SENSOR_DELAY_UI
+        )
         wm.addView(character, charParams)
     }
 
     private fun bounce() {
-        character.animate().translationY(-dp(10).toFloat()).setDuration(120)
+        character.animate().translationY(-dp(12).toFloat()).setDuration(120)
             .withEndAction { character.animate().translationY(0f).setDuration(160).start() }
             .start()
     }
@@ -149,16 +197,15 @@ class OverlayService : Service() {
             text = "✦ ESMU"; setTextColor(Color.parseColor("#A29BFE")); textSize = 16f
         }, LinearLayout.LayoutParams(0, -2, 1f))
 
-        val voiceBtn = TextView(this).apply {
+        header.addView(TextView(this).apply {
             text = if (voiceOn) "🔊" else "🔇"; textSize = 18f
             setPadding(dp(10), 0, dp(10), 0)
             setOnClickListener {
                 voiceOn = !voiceOn
                 text = if (voiceOn) "🔊" else "🔇"
-                if (!voiceOn) tts?.stop()
+                if (!voiceOn) { tts?.stop(); talking = false }
             }
-        }
-        header.addView(voiceBtn)
+        })
         header.addView(TextView(this).apply {
             text = "🗑"; textSize = 18f; setPadding(dp(10), 0, dp(10), 0)
             setOnClickListener {
@@ -220,7 +267,6 @@ class OverlayService : Service() {
             append("ESMU: No API key found. Save one in the app first.\n"); return
         }
 
-        // keep memory short (remove user+assistant pairs from the front)
         while (history.length() > 20) { history.remove(0); history.remove(0) }
         history.put(JSONObject().put("role", "user").put("content", q))
         append("ESMU: …\n")
@@ -235,7 +281,7 @@ class OverlayService : Service() {
                     if (voiceOn) tts?.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "esmu")
                 }
             } catch (e: Exception) {
-                history.remove(history.length() - 1) // drop the failed user turn
+                history.remove(history.length() - 1)
                 append("\nESMU: Oops, something went wrong.\n${e.message}\n")
             }
         }
