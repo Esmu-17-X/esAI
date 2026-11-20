@@ -7,7 +7,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 object ApiClient {
-    private const val MODEL = "gemini-2.5-flash"
+    private const val MODEL = "gemini-3.8-flash"
     private const val URL_API =
         "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
     private const val SYSTEM =
